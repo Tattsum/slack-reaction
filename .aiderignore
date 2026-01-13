@@ -1,0 +1,6 @@
+# Aider AI が無視するファイル
+node_modules/
+.git/
+*.log
+*.out
+slack-reaction
