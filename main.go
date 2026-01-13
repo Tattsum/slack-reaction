@@ -34,13 +34,13 @@ type UserStats struct {
 
 func main() {
 	log.Println("=== Slack リアクション分析ツール 開始 ===")
-	
+
 	// コマンドライン引数の定義
 	channelName := flag.String("channel", "", "分析対象のSlackチャンネル名（必須）")
 	startDate := flag.String("start", "", "開始日時（YYYY-MM-DD形式、省略可）")
 	endDate := flag.String("end", "", "終了日時（YYYY-MM-DD形式、省略可）")
 	flag.Parse()
-	
+
 	log.Printf("設定: チャンネル=%s, 開始日=%s, 終了日=%s", *channelName, *startDate, *endDate)
 
 	// チャンネル名が指定されていない場合はエラー
@@ -134,7 +134,7 @@ func getChannelID(api *slack.Client, channelName string) (string, error) {
 		log.Printf("チャンネル一覧取得エラー: %v", err)
 		return "", err
 	}
-	
+
 	log.Printf("取得したチャンネル数: %d", len(conversations))
 
 	// 指定されたチャンネル名に一致するチャンネルを検索
@@ -189,7 +189,7 @@ func analyzeChannel(api *slack.Client, channelID, oldest, latest string) ([]Emoj
 	for hasMore {
 		pageCount++
 		log.Printf("メッセージ取得中... (ページ %d)", pageCount)
-		
+
 		// メッセージの取得
 		history, err := api.GetConversationHistoryContext(ctx, &params)
 		if err != nil {
@@ -213,7 +213,7 @@ func analyzeChannel(api *slack.Client, channelID, oldest, latest string) ([]Emoj
 			// メインメッセージを処理
 			processMessage(&msg, emojiCount, &messageReactions, userMessageCount, userIDs)
 			totalMessages++
-			
+
 			if totalMessages%100 == 0 {
 				log.Printf("累積メッセージ処理数: %d", totalMessages)
 			}
@@ -225,7 +225,7 @@ func analyzeChannel(api *slack.Client, channelID, oldest, latest string) ([]Emoj
 				log.Printf("スレッド処理中... (#%d: %s)", totalThreads, msg.Timestamp)
 				// レート制限を避けるため少し待機してからスレッド処理
 				time.Sleep(100 * time.Millisecond)
-				
+
 				err := processThreadMessages(api, ctx, channelID, msg.Timestamp, oldest, latest, emojiCount, &messageReactions, userMessageCount, userIDs)
 				if err != nil {
 					log.Printf("スレッドメッセージの処理でエラーが発生しました: %v", err)
@@ -311,7 +311,7 @@ func processMessage(msg *slack.Message, emojiCount map[string]int, messageReacti
 // スレッドメッセージを処理する関数（レート制限対応）
 func processThreadMessages(api *slack.Client, ctx context.Context, channelID, threadTimestamp, oldest, latest string, emojiCount map[string]int, messageReactions *[]MessageReaction, userMessageCount map[string]int, userIDs map[string]bool) error {
 	const maxRetries = 3
-	
+
 	for retry := 0; retry < maxRetries; retry++ {
 		params := slack.GetConversationRepliesParameters{
 			ChannelID: channelID,
@@ -413,7 +413,7 @@ func isMessageInDateRange(msg *slack.Message, oldest, latest string) bool {
 // ユーザー名を一括で取得する最適化された関数
 func fetchUserNames(api *slack.Client, userIDs map[string]bool) map[string]string {
 	userNames := make(map[string]string)
-	
+
 	// 全ユーザーリストを一度だけ取得
 	users, err := api.GetUsers()
 	if err != nil {
@@ -453,27 +453,27 @@ func fetchUserNamesIndividual(api *slack.Client, userIDs map[string]bool) map[st
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var processedCount int
-	
+
 	log.Printf("個別ユーザー情報取得開始 (対象: %d人)...", len(userIDs))
 	// 並行処理でユーザー情報を取得（レート制限を考慮して制限）
 	semaphore := make(chan struct{}, 10)
-	
+
 	for userID := range userIDs {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
-			
+
 			userInfo, err := api.GetUserInfo(id)
-			
+
 			mu.Lock()
 			processedCount++
 			if processedCount%10 == 0 {
 				log.Printf("ユーザー情報取得進捗: %d/%d", processedCount, len(userIDs))
 			}
 			mu.Unlock()
-			
+
 			if err == nil && userInfo != nil {
 				mu.Lock()
 				if userInfo.Profile.DisplayName != "" {
@@ -493,7 +493,7 @@ func fetchUserNamesIndividual(api *slack.Client, userIDs map[string]bool) map[st
 			}
 		}(userID)
 	}
-	
+
 	wg.Wait()
 	return userNames
 }
