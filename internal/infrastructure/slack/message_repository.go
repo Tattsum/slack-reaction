@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tattsum/slack-reaction/internal/domain"
@@ -373,44 +374,85 @@ func (r *MessageRepository) findByUserWithSearchAPI(ctx context.Context, userID 
 		}
 	}
 
-	// 各チャンネルからメッセージを取得してリアクション情報を補完
+	// 各チャンネルからメッセージを取得してリアクション情報を補完（並列処理）
 	fmt.Printf("リアクション情報を補完中... (%dチャンネル)\n", len(channelIDs))
 	channelMsgMap := make(map[string]map[string]*domain.Message) // channelID -> messageID -> message
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
+	// セマフォで同時実行数を制限（レート制限を考慮して最大10並行）
+	semaphore := make(chan struct{}, 10)
+	channelIDList := make([]string, 0, len(channelIDs))
 	for channelID := range channelIDs {
-		channelMessages, err := r.findByChannelSilent(ctx, channelID, dateRange)
-		if err != nil {
-			continue
-		}
-		msgMap := make(map[string]*domain.Message)
-		for _, chMsg := range channelMessages {
-			msgMap[chMsg.ID] = chMsg
-		}
-		channelMsgMap[channelID] = msgMap
+		channelIDList = append(channelIDList, channelID)
 	}
 
+	// 並列処理でチャンネルからメッセージを取得
+	for _, channelID := range channelIDList {
+		wg.Add(1)
+		go func(cid string) {
+			defer wg.Done()
+			semaphore <- struct{}{} // セマフォを取得
+			defer func() { <-semaphore }() // セマフォを解放
+
+			channelMessages, err := r.findByChannelSilent(ctx, cid, dateRange)
+			if err != nil {
+				return
+			}
+			msgMap := make(map[string]*domain.Message)
+			for _, chMsg := range channelMessages {
+				msgMap[chMsg.ID] = chMsg
+			}
+
+			mu.Lock()
+			channelMsgMap[cid] = msgMap
+			mu.Unlock()
+		}(channelID)
+	}
+
+	wg.Wait()
+
 	// リアクション情報とスレッド情報を補完
+	// スレッド返信も並列処理で取得
+	var threadRepliesMutex sync.Mutex
+	threadReplies := make([]*domain.Message, 0)
+
 	for _, msg := range allMessages {
 		if msgMap, exists := channelMsgMap[msg.ChannelID]; exists {
 			if fullMsg, found := msgMap[msg.ID]; found {
 				msg.Reactions = fullMsg.Reactions
 				msg.ThreadTS = fullMsg.ThreadTS
 
-				// スレッドの親メッセージの場合は、スレッド返信も取得
+				// スレッドの親メッセージの場合は、スレッド返信も取得（並列処理）
 				if msg.IsThreadParent() {
-					replies, err := r.FindThreadReplies(ctx, msg.ChannelID, msg.ThreadTS, dateRange)
-					if err == nil {
-						// ユーザーのスレッド返信のみを追加
-						for _, reply := range replies {
-							if reply.UserID == userID {
-								allMessages = append(allMessages, reply)
+					wg.Add(1)
+					go func(m *domain.Message) {
+						defer wg.Done()
+						semaphore <- struct{}{} // セマフォを取得
+						defer func() { <-semaphore }() // セマフォを解放
+
+						replies, err := r.FindThreadReplies(ctx, m.ChannelID, m.ThreadTS, dateRange)
+						if err == nil {
+							// ユーザーのスレッド返信のみを追加
+							threadRepliesMutex.Lock()
+							for _, reply := range replies {
+								if reply.UserID == userID {
+									threadReplies = append(threadReplies, reply)
+								}
 							}
+							threadRepliesMutex.Unlock()
 						}
-					}
+					}(msg)
 				}
 			}
 		}
 	}
+
+	// スレッド返信の取得が完了するまで待機
+	wg.Wait()
+
+	// スレッド返信を追加
+	allMessages = append(allMessages, threadReplies...)
 
 	fmt.Printf("リアクション情報の補完完了: 合計 %d件のメッセージ\n", len(allMessages))
 	return allMessages, nil
@@ -461,65 +503,99 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 	}
 
 	var allMessages []*domain.Message
-	channelCount := 0
 	totalChannels := len(channels)
 
-	fmt.Printf("全%dチャンネルからメッセージを検索します...\n", totalChannels)
+	fmt.Printf("全%dチャンネルからメッセージを検索します（並列処理）...\n", totalChannels)
+
+	// 並列処理でチャンネルからメッセージを取得
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	processedCount := 0
+	var processedMutex sync.Mutex
+
+	// セマフォで同時実行数を制限（レート制限を考慮して最大10並行）
+	semaphore := make(chan struct{}, 10)
 
 	for _, channel := range channels {
-		channelCount++
+		wg.Add(1)
+		go func(ch *domain.Channel) {
+			defer wg.Done()
+			semaphore <- struct{}{} // セマフォを取得
+			defer func() { <-semaphore }() // セマフォを解放
 
-		// 進捗表示（10チャンネルごと、または最後のチャンネル）
-		if channelCount%10 == 0 || channelCount == totalChannels {
-			fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", channelCount, totalChannels, len(allMessages))
-		}
+			// チャンネルのメッセージを取得（進捗表示を抑制、レート制限対応）
+			messages, err := r.findByChannelSilentWithRetry(ctx, ch.ID, dateRange)
+			if err != nil {
+				// チャンネルに参加していない場合はスキップ
+				if strings.Contains(err.Error(), "参加していません") {
+					processedMutex.Lock()
+					processedCount++
+					processedMutex.Unlock()
+					return
+				}
+				// レート制限エラーは既にリトライ済みなので、スキップ
+				if isRateLimitError(err) {
+					processedMutex.Lock()
+					processedCount++
+					processedMutex.Unlock()
+					return
+				}
+				// その他のエラーもログに記録するが、処理は続行
+				processedMutex.Lock()
+				processedCount++
+				if processedCount%10 == 0 || processedCount == totalChannels {
+					fmt.Printf("警告: チャンネル '%s' のメッセージ取得エラー: %v\n", ch.Name, err)
+				}
+				processedMutex.Unlock()
+				return
+			}
 
-		// チャンネルのメッセージを取得（進捗表示を抑制、レート制限対応）
-		messages, err := r.findByChannelSilentWithRetry(ctx, channel.ID, dateRange)
-		if err != nil {
-			// チャンネルに参加していない場合はスキップ
-			if strings.Contains(err.Error(), "参加していません") {
-				continue
-			}
-			// レート制限エラーは既にリトライ済みなので、スキップ
-			if isRateLimitError(err) {
-				// レート制限エラーは既にリトライ済みなので、スキップ（警告は出さない）
-				continue
-			}
-			// その他のエラーもログに記録するが、処理は続行
-			if channelCount%10 == 0 || channelCount == totalChannels {
-				fmt.Printf("警告: チャンネル '%s' のメッセージ取得エラー: %v\n", channel.Name, err)
-			}
-			continue
-		}
+			// 指定されたユーザーのメッセージのみをフィルタリング
+			userMessages := make([]*domain.Message, 0)
+			threadParents := make([]*domain.Message, 0)
 
-		// 指定されたユーザーのメッセージのみをフィルタリング
-		userMessageCount := 0
-		for _, msg := range messages {
-			if msg.UserID == userID {
-				allMessages = append(allMessages, msg)
-				userMessageCount++
-			}
-		}
-
-		// スレッドの返信も取得（ユーザーのメッセージがある場合のみ）
-		if userMessageCount > 0 {
 			for _, msg := range messages {
-				if msg.IsThreadParent() && msg.UserID == userID {
-					replies, err := r.FindThreadReplies(ctx, channel.ID, msg.ThreadTS, dateRange)
-					if err != nil {
-						continue
-					}
-					// 指定されたユーザーのスレッド返信のみをフィルタリング
-					for _, reply := range replies {
-						if reply.UserID == userID {
-							allMessages = append(allMessages, reply)
-						}
+				if msg.UserID == userID {
+					userMessages = append(userMessages, msg)
+					if msg.IsThreadParent() {
+						threadParents = append(threadParents, msg)
 					}
 				}
 			}
-		}
+
+			// スレッドの返信も取得（ユーザーのメッセージがある場合のみ）
+			threadReplies := make([]*domain.Message, 0)
+			for _, msg := range threadParents {
+				replies, err := r.FindThreadReplies(ctx, ch.ID, msg.ThreadTS, dateRange)
+				if err != nil {
+					continue
+				}
+				// 指定されたユーザーのスレッド返信のみをフィルタリング
+				for _, reply := range replies {
+					if reply.UserID == userID {
+						threadReplies = append(threadReplies, reply)
+					}
+				}
+			}
+
+			// 結果を追加
+			mu.Lock()
+			allMessages = append(allMessages, userMessages...)
+			allMessages = append(allMessages, threadReplies...)
+			processedCount++
+			currentCount := processedCount
+			mu.Unlock()
+
+			// 進捗表示（10チャンネルごと、または最後のチャンネル）
+			if currentCount%10 == 0 || currentCount == totalChannels {
+				mu.Lock()
+				fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, len(allMessages))
+				mu.Unlock()
+			}
+		}(channel)
 	}
+
+	wg.Wait()
 
 	fmt.Printf("メッセージ検索完了: 合計 %d件のメッセージが見つかりました\n", len(allMessages))
 	return allMessages, nil
