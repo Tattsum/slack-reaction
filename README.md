@@ -37,7 +37,12 @@ Slackチャンネルのリアクション分析ツール
 ### 実行
 
 ```bash
-go run main.go -channel <チャンネル名> [-start YYYY-MM-DD] [-end YYYY-MM-DD]
+# 新しいアーキテクチャ（推奨）
+go run ./cmd/slack-reaction -channel <チャンネル名> [-start YYYY-MM-DD] [-end YYYY-MM-DD]
+
+# またはビルドして実行
+make build
+./slack-reaction -channel <チャンネル名> [-start YYYY-MM-DD] [-end YYYY-MM-DD]
 ```
 
 #### パラメータ
@@ -50,10 +55,10 @@ go run main.go -channel <チャンネル名> [-start YYYY-MM-DD] [-end YYYY-MM-D
 
 ```bash
 # 全期間の分析
-go run main.go -channel general
+go run ./cmd/slack-reaction -channel general
 
 # 期間を指定した分析
-go run main.go -channel general -start 2023-01-01 -end 2023-12-31
+go run ./cmd/slack-reaction -channel general -start 2023-01-01 -end 2023-12-31
 ```
 
 ## 出力例
@@ -87,6 +92,35 @@ go run main.go -channel general -start 2023-01-01 -end 2023-12-31
 - 期間指定による分析
 - レート制限対応による安定した実行
 - 並行処理によるパフォーマンス最適化
+
+## アーキテクチャ
+
+このプロジェクトは**ドメイン駆動設計（DDD）**と**テスト駆動開発（TDD）**の原則に基づいて設計されています。
+
+### ディレクトリ構造
+
+```text
+slack-reaction/
+├── cmd/
+│   └── slack-reaction/    # アプリケーションエントリーポイント
+├── internal/
+│   ├── domain/            # ドメインモデル（エンティティ、値オブジェクト）
+│   ├── service/           # ビジネスロジック（ユースケース）
+│   └── infrastructure/    # インフラ層（Slack APIクライアント）
+│       └── slack/
+└── docs/                  # ドキュメント
+```
+
+### レイヤー分離
+
+- **Domain層**: ビジネスロジックの中核となるドメインモデル
+- **Service層**: ドメインロジックを組み合わせたユースケース実装
+- **Infrastructure層**: 外部API（Slack API）との通信
+
+### テスト
+
+- **ユニットテスト**: ドメインロジックとサービスロジックのテスト
+- **テストカバレッジ**: `make test-coverage` でカバレッジレポートを生成
 
 ## セキュリティ
 
