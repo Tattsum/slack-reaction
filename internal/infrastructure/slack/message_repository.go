@@ -542,9 +542,10 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 					processedMutex.Lock()
 					processedCount++
 					currentCount := processedCount
+					shouldPrint := currentCount%10 == 0 || currentCount == totalChannels
 					processedMutex.Unlock()
 					// 進捗表示
-					if currentCount%10 == 0 || currentCount == totalChannels {
+					if shouldPrint {
 						mu.Lock()
 						messageCount := len(allMessages)
 						mu.Unlock()
@@ -557,9 +558,10 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 					processedMutex.Lock()
 					processedCount++
 					currentCount := processedCount
+					shouldPrint := currentCount%10 == 0 || currentCount == totalChannels
 					processedMutex.Unlock()
 					// 進捗表示
-					if currentCount%10 == 0 || currentCount == totalChannels {
+					if shouldPrint {
 						mu.Lock()
 						messageCount := len(allMessages)
 						mu.Unlock()
@@ -571,8 +573,9 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 				processedMutex.Lock()
 				processedCount++
 				currentCount := processedCount
+				shouldPrint := currentCount%10 == 0 || currentCount == totalChannels
 				processedMutex.Unlock()
-				if currentCount%10 == 0 || currentCount == totalChannels {
+				if shouldPrint {
 					mu.Lock()
 					messageCount := len(allMessages)
 					mu.Unlock()
@@ -616,6 +619,7 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 			mu.Lock()
 			allMessages = append(allMessages, userMessages...)
 			allMessages = append(allMessages, threadReplies...)
+			messageCount := len(allMessages) // ロック保持中にメッセージ数を取得
 			mu.Unlock()
 
 			// 進捗表示（10チャンネルごと、または最後のチャンネル）
@@ -626,9 +630,6 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 			processedMutex.Unlock()
 
 			if shouldPrint {
-				mu.Lock()
-				messageCount := len(allMessages)
-				mu.Unlock()
 				fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, messageCount)
 			}
 		}(channel)
