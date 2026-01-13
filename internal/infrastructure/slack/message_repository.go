@@ -373,8 +373,8 @@ func (r *MessageRepository) findByUserWithSearchAPI(ctx context.Context, userID 
 	fmt.Printf("Search API検索完了: 合計 %d件のメッセージが見つかりました\n", len(allMessages))
 
 	// リアクション情報とスレッド情報を補完するため、チャンネルごとにメッセージを取得
-	// チャンネルIDのセットを作成
-	channelIDs := make(map[string]bool)
+	// チャンネルIDのセットを作成（容量を事前に推定）
+	channelIDs := make(map[string]bool, len(allMessages)/10) // チャンネル数はメッセージ数の10%程度と仮定
 	for _, msg := range allMessages {
 		if msg.ChannelID != "" {
 			channelIDs[msg.ChannelID] = true
@@ -383,7 +383,8 @@ func (r *MessageRepository) findByUserWithSearchAPI(ctx context.Context, userID 
 
 	// 各チャンネルからメッセージを取得してリアクション情報を補完（並列処理）
 	fmt.Printf("リアクション情報を補完中... (%dチャンネル)\n", len(channelIDs))
-	channelMsgMap := make(map[string]map[string]*domain.Message) // channelID -> messageID -> message
+	// チャンネル数分の容量を事前に確保
+	channelMsgMap := make(map[string]map[string]*domain.Message, len(channelIDs)) // channelID -> messageID -> message
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
@@ -422,7 +423,8 @@ func (r *MessageRepository) findByUserWithSearchAPI(ctx context.Context, userID 
 	// リアクション情報とスレッド情報を補完
 	// スレッド返信も並列処理で取得
 	var threadRepliesMutex sync.Mutex
-	threadReplies := make([]*domain.Message, 0)
+	// スレッド返信の数を事前に推定（親メッセージ数の最大値）
+	threadReplies := make([]*domain.Message, 0, len(allMessages))
 
 	for _, msg := range allMessages {
 		if msgMap, exists := channelMsgMap[msg.ChannelID]; exists {
@@ -479,6 +481,7 @@ func (r *MessageRepository) convertSearchResultToDomainMessage(match *slack.Sear
 	}
 
 	// リアクションを取得（Search APIの結果にはリアクション情報が含まれない可能性があるため、空スライス）
+	// 容量を0に設定（後で補完される）
 	reactions := make([]domain.Reaction, 0)
 
 	// チャンネルIDを取得（Search APIの結果から）
@@ -580,8 +583,9 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 			}
 
 			// 指定されたユーザーのメッセージのみをフィルタリング
-			userMessages := make([]*domain.Message, 0)
-			threadParents := make([]*domain.Message, 0)
+			// 容量を事前に推定（メッセージ数の最大値）
+			userMessages := make([]*domain.Message, 0, len(messages))
+			threadParents := make([]*domain.Message, 0, len(messages)/10) // スレッド親は全体の10%程度と仮定
 
 			for _, msg := range messages {
 				if msg.UserID == userID {
@@ -593,7 +597,8 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 			}
 
 			// スレッドの返信も取得（ユーザーのメッセージがある場合のみ）
-			threadReplies := make([]*domain.Message, 0)
+			// スレッド返信の容量を事前に推定
+			threadReplies := make([]*domain.Message, 0, len(threadParents)*5) // スレッドあたり平均5件と仮定
 			for _, msg := range threadParents {
 				replies, err := r.FindThreadReplies(ctx, ch.ID, msg.ThreadTS, dateRange)
 				if err != nil {

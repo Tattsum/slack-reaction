@@ -1,6 +1,6 @@
 module github.com/Tattsum/slack-reaction
 
-go 1.24.2
+go 1.25
 
 require github.com/slack-go/slack v0.17.3
 

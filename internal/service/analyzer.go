@@ -100,11 +100,12 @@ type AnalysisResult struct {
 
 // aggregate はメッセージから統計情報を集計する
 func (a *Analyzer) aggregate(messages []*domain.Message) *AnalysisResult {
-	emojiCount := make(map[string]int)
-	messageReactions := make([]domain.MessageReaction, 0)
-	userMessageCount := make(map[string]int)
-	threadReplyCount := make(map[string]int) // スレッドの親メッセージID -> コメント数
-	threadParents := make(map[string]*domain.Message) // スレッドの親メッセージID -> 親メッセージ
+	// メモリ割り当ての最適化: 容量を事前に推定
+	emojiCount := make(map[string]int, len(messages)/10) // 絵文字の種類はメッセージ数の10%程度と仮定
+	messageReactions := make([]domain.MessageReaction, 0, len(messages)/2) // リアクションがあるメッセージは50%程度と仮定
+	userMessageCount := make(map[string]int, len(messages)/20) // ユーザー数はメッセージ数の5%程度と仮定
+	threadReplyCount := make(map[string]int, len(messages)/10) // スレッドの親メッセージID -> コメント数
+	threadParents := make(map[string]*domain.Message, len(messages)/10) // スレッドの親メッセージID -> 親メッセージ
 
 	for _, msg := range messages {
 		// ボットメッセージをスキップ
@@ -159,7 +160,7 @@ func (a *Analyzer) aggregate(messages []*domain.Message) *AnalysisResult {
 	})
 
 	// スレッドのコメント数ランキングを作成
-	threadStats := make([]domain.ThreadStats, 0)
+	threadStats := make([]domain.ThreadStats, 0, len(threadParents))
 	for threadID, parentMsg := range threadParents {
 		replyCount := threadReplyCount[threadID]
 		if replyCount > 0 {
@@ -250,9 +251,10 @@ func (a *Analyzer) AnalyzeUser(ctx context.Context, userName string, dateRange *
 // aggregateUserMessages はユーザーのメッセージから統計情報を集計する
 func (a *Analyzer) aggregateUserMessages(ctx context.Context, userMessages []*domain.Message, userID string, dateRange *domain.DateRange) *UserAnalysisResult {
 	totalReactions := 0
-	emojiCount := make(map[string]int)
-	threadReplyCount := make(map[string]int) // スレッドの親メッセージID -> コメント数
-	threadParents := make(map[string]*domain.Message) // スレッドの親メッセージID -> 親メッセージ
+	// メモリ割り当ての最適化: 容量を事前に推定
+	emojiCount := make(map[string]int, len(userMessages)/5) // 絵文字の種類はメッセージ数の20%程度と仮定
+	threadReplyCount := make(map[string]int, len(userMessages)/10) // スレッドの親メッセージID -> コメント数
+	threadParents := make(map[string]*domain.Message, len(userMessages)/10) // スレッドの親メッセージID -> 親メッセージ
 
 	// ユーザーの投稿を処理
 	for _, msg := range userMessages {
@@ -294,7 +296,7 @@ func (a *Analyzer) aggregateUserMessages(ctx context.Context, userMessages []*do
 	}
 
 	// スレッドのコメント数ランキングを作成
-	threadStats := make([]domain.ThreadStats, 0)
+	threadStats := make([]domain.ThreadStats, 0, len(threadParents))
 	for threadID, parentMsg := range threadParents {
 		replyCount := threadReplyCount[threadID]
 		if replyCount > 0 {
