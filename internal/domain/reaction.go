@@ -18,3 +18,10 @@ type MessageReaction struct {
 	Reactions int
 	Timestamp string
 }
+
+// ThreadStats はスレッドのコメント数を表すドメインモデル
+type ThreadStats struct {
+	Text      string
+	ReplyCount int
+	Timestamp string
+}
