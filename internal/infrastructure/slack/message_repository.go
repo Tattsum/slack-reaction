@@ -277,7 +277,182 @@ func extractRetryAfter(errMsg string) int {
 }
 
 // FindByUser は指定されたユーザーIDのメッセージを全チャンネルから取得する
+// まずSearch APIを試し、失敗した場合は既存の方法（全チャンネル横断）にフォールバック
 func (r *MessageRepository) FindByUser(ctx context.Context, userID string, dateRange *domain.DateRange) ([]*domain.Message, error) {
+	// Search APIを試す
+	messages, err := r.findByUserWithSearchAPI(ctx, userID, dateRange)
+	if err == nil {
+		return messages, nil
+	}
+
+	// Search APIが使えない場合は、既存の方法にフォールバック
+	fmt.Printf("Search APIが利用できないため、全チャンネル横断方式で検索します... (エラー: %v)\n", err)
+	return r.findByUserFallback(ctx, userID, dateRange)
+}
+
+// findByUserWithSearchAPI はSearch APIを使用してユーザーのメッセージを検索する
+func (r *MessageRepository) findByUserWithSearchAPI(ctx context.Context, userID string, dateRange *domain.DateRange) ([]*domain.Message, error) {
+	// 検索クエリを構築: "from:userID"
+	query := fmt.Sprintf("from:<@%s>", userID)
+
+	// 日付範囲がある場合はクエリに追加
+	if dateRange != nil {
+		if !dateRange.Start.IsZero() {
+			query += fmt.Sprintf(" after:%s", dateRange.Start.Format("2006-01-02"))
+		}
+		if !dateRange.End.IsZero() {
+			query += fmt.Sprintf(" before:%s", dateRange.End.Format("2006-01-02"))
+		}
+	}
+
+	var allMessages []*domain.Message
+	page := 1
+	const maxRetries = 3
+
+	for {
+	searchParams := slack.NewSearchParameters()
+	searchParams.Count = 100 // 最大100件/ページ
+	searchParams.Page = page
+
+		var searchResults *slack.SearchMessages
+		var err error
+
+		// レート制限対応のリトライループ
+		for retry := 0; retry < maxRetries; retry++ {
+			searchResults, err = r.client.SearchMessages(query, searchParams)
+			if err != nil {
+				if isRateLimitError(err) {
+					sleepTime := extractRetryAfter(err.Error())
+					if sleepTime > 0 {
+						time.Sleep(time.Duration(sleepTime) * time.Second)
+						continue
+					} else {
+						time.Sleep(time.Duration(10+retry*5) * time.Second)
+						continue
+					}
+				}
+				// レート制限以外のエラーは即座に返す
+				if retry == maxRetries-1 {
+					return nil, fmt.Errorf("Search APIエラー: %w", err)
+				}
+			} else {
+				// 成功したらループを抜ける
+				break
+			}
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("Search APIエラー: %w", err)
+		}
+
+		// 検索結果をドメインモデルに変換
+		for _, match := range searchResults.Matches {
+			msg := r.convertSearchResultToDomainMessage(&match, dateRange)
+			if msg != nil && msg.UserID == userID {
+				allMessages = append(allMessages, msg)
+			}
+		}
+
+		fmt.Printf("Search API: ページ %d 処理完了 (累計: %d件)\n", page, len(allMessages))
+
+		// 次のページがあるかチェック
+		if page >= searchResults.Paging.Pages {
+			break
+		}
+		page++
+	}
+
+	fmt.Printf("Search API検索完了: 合計 %d件のメッセージが見つかりました\n", len(allMessages))
+
+	// リアクション情報とスレッド情報を補完するため、チャンネルごとにメッセージを取得
+	// チャンネルIDのセットを作成
+	channelIDs := make(map[string]bool)
+	for _, msg := range allMessages {
+		if msg.ChannelID != "" {
+			channelIDs[msg.ChannelID] = true
+		}
+	}
+
+	// 各チャンネルからメッセージを取得してリアクション情報を補完
+	fmt.Printf("リアクション情報を補完中... (%dチャンネル)\n", len(channelIDs))
+	channelMsgMap := make(map[string]map[string]*domain.Message) // channelID -> messageID -> message
+
+	for channelID := range channelIDs {
+		channelMessages, err := r.findByChannelSilent(ctx, channelID, dateRange)
+		if err != nil {
+			continue
+		}
+		msgMap := make(map[string]*domain.Message)
+		for _, chMsg := range channelMessages {
+			msgMap[chMsg.ID] = chMsg
+		}
+		channelMsgMap[channelID] = msgMap
+	}
+
+	// リアクション情報とスレッド情報を補完
+	for _, msg := range allMessages {
+		if msgMap, exists := channelMsgMap[msg.ChannelID]; exists {
+			if fullMsg, found := msgMap[msg.ID]; found {
+				msg.Reactions = fullMsg.Reactions
+				msg.ThreadTS = fullMsg.ThreadTS
+
+				// スレッドの親メッセージの場合は、スレッド返信も取得
+				if msg.IsThreadParent() {
+					replies, err := r.FindThreadReplies(ctx, msg.ChannelID, msg.ThreadTS, dateRange)
+					if err == nil {
+						// ユーザーのスレッド返信のみを追加
+						for _, reply := range replies {
+							if reply.UserID == userID {
+								allMessages = append(allMessages, reply)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	fmt.Printf("リアクション情報の補完完了: 合計 %d件のメッセージ\n", len(allMessages))
+	return allMessages, nil
+}
+
+// convertSearchResultToDomainMessage はSearch APIの結果をドメインモデルに変換する
+func (r *MessageRepository) convertSearchResultToDomainMessage(match *slack.SearchMessage, dateRange *domain.DateRange) *domain.Message {
+	// タイムスタンプを解析
+	timestamp, err := parseSlackTimestamp(match.Timestamp)
+	if err != nil {
+		return nil
+	}
+
+	// 日付範囲チェック
+	if dateRange != nil && !dateRange.Contains(timestamp) {
+		return nil
+	}
+
+	// リアクションを取得（Search APIの結果にはリアクション情報が含まれない可能性があるため、空スライス）
+	reactions := make([]domain.Reaction, 0)
+
+	// チャンネルIDを取得（Search APIの結果から）
+	channelID := match.Channel.ID
+
+	// スレッド情報を取得（Search APIの結果からはスレッド情報が直接取得できないため、後で確認する必要がある）
+	// タイムスタンプをIDとして使用
+	threadTS := match.Timestamp
+
+	return &domain.Message{
+		ID:        match.Timestamp,
+		Text:      match.Text,
+		UserID:    match.User,
+		ChannelID: channelID,
+		Timestamp: timestamp,
+		Reactions: reactions,
+		IsBot:     false, // Search APIの結果からは判定できないため、falseとする
+		ThreadTS:  threadTS,
+	}
+}
+
+// findByUserFallback は既存の方法（全チャンネル横断）でユーザーのメッセージを検索する
+func (r *MessageRepository) findByUserFallback(ctx context.Context, userID string, dateRange *domain.DateRange) ([]*domain.Message, error) {
 	// 全チャンネルを取得
 	channelRepo := NewChannelRepository(r.client)
 	channels, err := channelRepo.FindAll(ctx)
