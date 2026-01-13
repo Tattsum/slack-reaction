@@ -287,7 +287,14 @@ func (r *MessageRepository) FindByUser(ctx context.Context, userID string, dateR
 	}
 
 	// Search APIが使えない場合は、既存の方法にフォールバック
-	fmt.Printf("Search APIが利用できないため、全チャンネル横断方式で検索します... (エラー: %v)\n", err)
+	// エラーメッセージを分かりやすく表示
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "not_allowed_token_type") {
+		fmt.Printf("Search APIは現在のトークンタイプでは利用できません。全チャンネル横断方式で検索します...\n")
+		fmt.Printf("（注: Search APIを使用するにはBot Tokenが必要です。User Tokenでは利用できません）\n")
+	} else {
+		fmt.Printf("Search APIが利用できないため、全チャンネル横断方式で検索します... (エラー: %v)\n", err)
+	}
 	return r.findByUserFallback(ctx, userID, dateRange)
 }
 
@@ -505,7 +512,8 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 	var allMessages []*domain.Message
 	totalChannels := len(channels)
 
-	fmt.Printf("全%dチャンネルからメッセージを検索します（並列処理）...\n", totalChannels)
+	fmt.Printf("全%dチャンネルからメッセージを検索します（並列処理、最大10並行）...\n", totalChannels)
+	fmt.Printf("進捗は10チャンネルごとに表示されます。処理には時間がかかる場合があります。\n")
 
 	// 並列処理でチャンネルからメッセージを取得
 	var mu sync.Mutex
@@ -530,23 +538,44 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 				if strings.Contains(err.Error(), "参加していません") {
 					processedMutex.Lock()
 					processedCount++
+					currentCount := processedCount
 					processedMutex.Unlock()
+					// 進捗表示
+					if currentCount%10 == 0 || currentCount == totalChannels {
+						mu.Lock()
+						messageCount := len(allMessages)
+						mu.Unlock()
+						fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, messageCount)
+					}
 					return
 				}
 				// レート制限エラーは既にリトライ済みなので、スキップ
 				if isRateLimitError(err) {
 					processedMutex.Lock()
 					processedCount++
+					currentCount := processedCount
 					processedMutex.Unlock()
+					// 進捗表示
+					if currentCount%10 == 0 || currentCount == totalChannels {
+						mu.Lock()
+						messageCount := len(allMessages)
+						mu.Unlock()
+						fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, messageCount)
+					}
 					return
 				}
 				// その他のエラーもログに記録するが、処理は続行
 				processedMutex.Lock()
 				processedCount++
-				if processedCount%10 == 0 || processedCount == totalChannels {
-					fmt.Printf("警告: チャンネル '%s' のメッセージ取得エラー: %v\n", ch.Name, err)
-				}
+				currentCount := processedCount
 				processedMutex.Unlock()
+				if currentCount%10 == 0 || currentCount == totalChannels {
+					mu.Lock()
+					messageCount := len(allMessages)
+					mu.Unlock()
+					fmt.Printf("警告: チャンネル '%s' のメッセージ取得エラー: %v\n", ch.Name, err)
+					fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, messageCount)
+				}
 				return
 			}
 
@@ -582,15 +611,20 @@ func (r *MessageRepository) findByUserFallback(ctx context.Context, userID strin
 			mu.Lock()
 			allMessages = append(allMessages, userMessages...)
 			allMessages = append(allMessages, threadReplies...)
-			processedCount++
-			currentCount := processedCount
 			mu.Unlock()
 
 			// 進捗表示（10チャンネルごと、または最後のチャンネル）
-			if currentCount%10 == 0 || currentCount == totalChannels {
+			processedMutex.Lock()
+			processedCount++
+			currentCount := processedCount
+			shouldPrint := currentCount%10 == 0 || currentCount == totalChannels
+			processedMutex.Unlock()
+
+			if shouldPrint {
 				mu.Lock()
-				fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, len(allMessages))
+				messageCount := len(allMessages)
 				mu.Unlock()
+				fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, messageCount)
 			}
 		}(channel)
 	}
