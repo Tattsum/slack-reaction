@@ -2,6 +2,8 @@ package slack
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/Tattsum/slack-reaction/internal/domain"
@@ -106,4 +108,24 @@ func (r *UserRepository) fetchUsersIndividual(ctx context.Context, userIDs []str
 
 	wg.Wait()
 	return userMap, nil
+}
+
+// FindByName はユーザー名からユーザーを検索する
+func (r *UserRepository) FindByName(ctx context.Context, name string) (*domain.User, error) {
+	allUsers, err := r.FindAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// 名前、表示名、実名で検索（大文字小文字を区別しない）
+	nameLower := strings.ToLower(name)
+	for _, user := range allUsers {
+		if strings.ToLower(user.Name) == nameLower ||
+			strings.ToLower(user.DisplayName) == nameLower ||
+			strings.ToLower(user.RealName) == nameLower {
+			return user, nil
+		}
+	}
+
+	return nil, fmt.Errorf("ユーザー '%s' が見つかりません", name)
 }

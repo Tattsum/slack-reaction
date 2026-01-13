@@ -45,15 +45,42 @@ func (r *MessageRepository) FindByChannel(ctx context.Context, channelID string,
 	var messages []*domain.Message
 	hasMore := true
 	pageCount := 0
+	const maxRetries = 3
 
 	for hasMore {
 		pageCount++
-		history, err := r.client.GetConversationHistoryContext(ctx, &params)
-		if err != nil {
-			// not_in_channelエラーの場合は、より分かりやすいメッセージを表示
-			if strings.Contains(err.Error(), "not_in_channel") {
-				return nil, fmt.Errorf("チャンネル '%s' に参加していません。Slackでこのチャンネルに参加してから再度実行してください", channelID)
+		var history *slack.GetConversationHistoryResponse
+		var err error
+
+		// レート制限対応のリトライループ
+		for retry := 0; retry < maxRetries; retry++ {
+			history, err = r.client.GetConversationHistoryContext(ctx, &params)
+			if err != nil {
+				// not_in_channelエラーの場合は、より分かりやすいメッセージを表示
+				if strings.Contains(err.Error(), "not_in_channel") {
+					return nil, fmt.Errorf("チャンネル '%s' に参加していません。Slackでこのチャンネルに参加してから再度実行してください", channelID)
+				}
+				if isRateLimitError(err) {
+					sleepTime := extractRetryAfter(err.Error())
+					if sleepTime > 0 {
+						time.Sleep(time.Duration(sleepTime) * time.Second)
+						continue
+					} else {
+						time.Sleep(time.Duration(10+retry*5) * time.Second)
+						continue
+					}
+				}
+				// レート制限以外のエラーは即座に返す
+				if retry == maxRetries-1 {
+					return nil, fmt.Errorf("メッセージ取得エラー: %w", err)
+				}
+			} else {
+				// 成功したらループを抜ける
+				break
 			}
+		}
+
+		if err != nil {
 			return nil, fmt.Errorf("メッセージ取得エラー: %w", err)
 		}
 
@@ -140,6 +167,38 @@ func (r *MessageRepository) FindThreadReplies(ctx context.Context, channelID str
 	return messages, nil
 }
 
+// findByChannelSilentWithRetry はfindByChannelSilentをレート制限対応で呼び出す
+func (r *MessageRepository) findByChannelSilentWithRetry(ctx context.Context, channelID string, dateRange *domain.DateRange) ([]*domain.Message, error) {
+	const maxRetries = 3
+	var lastErr error
+
+	for retry := 0; retry < maxRetries; retry++ {
+		messages, err := r.findByChannelSilent(ctx, channelID, dateRange)
+		if err == nil {
+			return messages, nil
+		}
+
+		lastErr = err
+
+		// レート制限エラーの場合のみリトライ
+		if isRateLimitError(err) {
+			sleepTime := extractRetryAfter(err.Error())
+			if sleepTime > 0 {
+				time.Sleep(time.Duration(sleepTime) * time.Second)
+			} else {
+				time.Sleep(time.Duration(10+retry*5) * time.Second)
+			}
+			continue
+		}
+
+		// レート制限以外のエラーは即座に返す
+		return nil, err
+	}
+
+	// 最大リトライ回数に達した場合は最後のエラーを返す
+	return nil, lastErr
+}
+
 // convertToDomainMessage はSlackのMessageをドメインモデルに変換する
 func (r *MessageRepository) convertToDomainMessage(msg *slack.Message, channelID string) *domain.Message {
 	// ボットメッセージをスキップ
@@ -190,15 +249,178 @@ func isRateLimitError(err error) bool {
 }
 
 // extractRetryAfter はエラーメッセージからretry-after時間を抽出
+// エラーメッセージの形式: "slack rate limit exceeded, retry after 10s"
 func extractRetryAfter(errMsg string) int {
-	if strings.Contains(errMsg, "retry after") {
-		parts := strings.Split(errMsg, "retry after ")
-		if len(parts) > 1 {
-			timeStr := strings.TrimSuffix(parts[1], "s")
-			if retryAfter, err := strconv.Atoi(timeStr); err == nil {
-				return retryAfter
+	// "retry after" で分割
+	if !strings.Contains(errMsg, "retry after") {
+		return 0
+	}
+
+	parts := strings.Split(errMsg, "retry after ")
+	if len(parts) < 2 {
+		return 0
+	}
+
+	// parts[1] は "10s" のような形式
+	timeStr := strings.TrimSpace(parts[1])
+	
+	// "s" を削除
+	timeStr = strings.TrimSuffix(timeStr, "s")
+	timeStr = strings.TrimSpace(timeStr)
+
+	// 数値に変換
+	if retryAfter, err := strconv.Atoi(timeStr); err == nil {
+		return retryAfter
+	}
+
+	return 0
+}
+
+// FindByUser は指定されたユーザーIDのメッセージを全チャンネルから取得する
+func (r *MessageRepository) FindByUser(ctx context.Context, userID string, dateRange *domain.DateRange) ([]*domain.Message, error) {
+	// 全チャンネルを取得
+	channelRepo := NewChannelRepository(r.client)
+	channels, err := channelRepo.FindAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("チャンネル一覧取得エラー: %w", err)
+	}
+
+	var allMessages []*domain.Message
+	channelCount := 0
+	totalChannels := len(channels)
+
+	fmt.Printf("全%dチャンネルからメッセージを検索します...\n", totalChannels)
+
+	for _, channel := range channels {
+		channelCount++
+
+		// 進捗表示（10チャンネルごと、または最後のチャンネル）
+		if channelCount%10 == 0 || channelCount == totalChannels {
+			fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", channelCount, totalChannels, len(allMessages))
+		}
+
+		// チャンネルのメッセージを取得（進捗表示を抑制、レート制限対応）
+		messages, err := r.findByChannelSilentWithRetry(ctx, channel.ID, dateRange)
+		if err != nil {
+			// チャンネルに参加していない場合はスキップ
+			if strings.Contains(err.Error(), "参加していません") {
+				continue
+			}
+			// レート制限エラーは既にリトライ済みなので、スキップ
+			if isRateLimitError(err) {
+				// レート制限エラーは既にリトライ済みなので、スキップ（警告は出さない）
+				continue
+			}
+			// その他のエラーもログに記録するが、処理は続行
+			if channelCount%10 == 0 || channelCount == totalChannels {
+				fmt.Printf("警告: チャンネル '%s' のメッセージ取得エラー: %v\n", channel.Name, err)
+			}
+			continue
+		}
+
+		// 指定されたユーザーのメッセージのみをフィルタリング
+		userMessageCount := 0
+		for _, msg := range messages {
+			if msg.UserID == userID {
+				allMessages = append(allMessages, msg)
+				userMessageCount++
+			}
+		}
+
+		// スレッドの返信も取得（ユーザーのメッセージがある場合のみ）
+		if userMessageCount > 0 {
+			for _, msg := range messages {
+				if msg.IsThreadParent() && msg.UserID == userID {
+					replies, err := r.FindThreadReplies(ctx, channel.ID, msg.ThreadTS, dateRange)
+					if err != nil {
+						continue
+					}
+					// 指定されたユーザーのスレッド返信のみをフィルタリング
+					for _, reply := range replies {
+						if reply.UserID == userID {
+							allMessages = append(allMessages, reply)
+						}
+					}
+				}
 			}
 		}
 	}
-	return 0
+
+	fmt.Printf("メッセージ検索完了: 合計 %d件のメッセージが見つかりました\n", len(allMessages))
+	return allMessages, nil
+}
+
+// findByChannelSilent はFindByChannelと同じだが、進捗表示を抑制する
+func (r *MessageRepository) findByChannelSilent(ctx context.Context, channelID string, dateRange *domain.DateRange) ([]*domain.Message, error) {
+	var oldest, latest string
+	if dateRange != nil {
+		if !dateRange.Start.IsZero() {
+			oldest = fmt.Sprintf("%d", dateRange.Start.Unix())
+		}
+		if !dateRange.End.IsZero() {
+			latest = fmt.Sprintf("%d", dateRange.End.Unix())
+		}
+	}
+
+	params := slack.GetConversationHistoryParameters{
+		ChannelID: channelID,
+		Oldest:    oldest,
+		Latest:    latest,
+		Limit:     1000,
+	}
+
+	var messages []*domain.Message
+	hasMore := true
+	const maxRetries = 3
+
+	for hasMore {
+		var history *slack.GetConversationHistoryResponse
+		var err error
+
+		// レート制限対応のリトライループ
+		for retry := 0; retry < maxRetries; retry++ {
+			history, err = r.client.GetConversationHistoryContext(ctx, &params)
+			if err != nil {
+				// not_in_channelエラーの場合は、より分かりやすいメッセージを表示
+				if strings.Contains(err.Error(), "not_in_channel") {
+					return nil, fmt.Errorf("チャンネル '%s' に参加していません。Slackでこのチャンネルに参加してから再度実行してください", channelID)
+				}
+				if isRateLimitError(err) {
+					sleepTime := extractRetryAfter(err.Error())
+					if sleepTime > 0 {
+						time.Sleep(time.Duration(sleepTime) * time.Second)
+						continue
+					} else {
+						time.Sleep(time.Duration(10+retry*5) * time.Second)
+						continue
+					}
+				}
+				// レート制限以外のエラーは即座に返す
+				if retry == maxRetries-1 {
+					return nil, fmt.Errorf("メッセージ取得エラー: %w", err)
+				}
+			} else {
+				// 成功したらループを抜ける
+				break
+			}
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("メッセージ取得エラー: %w", err)
+		}
+
+		for _, msg := range history.Messages {
+			domainMsg := r.convertToDomainMessage(&msg, channelID)
+			if domainMsg != nil {
+				messages = append(messages, domainMsg)
+			}
+		}
+
+		hasMore = history.HasMore
+		if hasMore {
+			params.Cursor = history.ResponseMetaData.NextCursor
+		}
+	}
+
+	return messages, nil
 }

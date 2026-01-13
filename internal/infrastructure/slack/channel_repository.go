@@ -63,3 +63,34 @@ func (r *ChannelRepository) FindByName(ctx context.Context, name string) (*domai
 
 	return nil, fmt.Errorf("チャンネル '%s' が見つかりません", name)
 }
+
+// FindAll はすべてのチャンネルを取得する
+func (r *ChannelRepository) FindAll(ctx context.Context) ([]*domain.Channel, error) {
+	var allChannels []*domain.Channel
+	cursor := ""
+	
+	for {
+		conversations, nextCursor, err := r.client.GetConversations(&slack.GetConversationsParameters{
+			ExcludeArchived: true,
+			Limit:           1000,
+			Cursor:          cursor,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("チャンネル一覧取得エラー: %w", err)
+		}
+
+		for _, conversation := range conversations {
+			allChannels = append(allChannels, &domain.Channel{
+				ID:   conversation.ID,
+				Name: conversation.Name,
+			})
+		}
+
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
+	}
+
+	return allChannels, nil
+}
