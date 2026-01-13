@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -35,6 +36,20 @@ func (m *mockMessageRepository) FindThreadReplies(ctx context.Context, channelID
 	return replies, nil
 }
 
+func (m *mockMessageRepository) FindByUser(ctx context.Context, userID string, dateRange *domain.DateRange) ([]*domain.Message, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	// 指定されたユーザーのメッセージをフィルタリング
+	userMessages := make([]*domain.Message, 0)
+	for _, msg := range m.messages {
+		if msg.UserID == userID {
+			userMessages = append(userMessages, msg)
+		}
+	}
+	return userMessages, nil
+}
+
 // mockUserRepository はUserRepositoryのモック実装
 type mockUserRepository struct {
 	users map[string]*domain.User
@@ -61,6 +76,19 @@ func (m *mockUserRepository) FindAll(ctx context.Context) (map[string]*domain.Us
 		return nil, m.err
 	}
 	return m.users, nil
+}
+
+func (m *mockUserRepository) FindByName(ctx context.Context, name string) (*domain.User, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	// 名前、表示名、実名で検索（大文字小文字を区別しない）
+	for _, user := range m.users {
+		if user.Name == name || user.DisplayName == name || user.RealName == name {
+			return user, nil
+		}
+	}
+	return nil, fmt.Errorf("ユーザー '%s' が見つかりません", name)
 }
 
 func TestAnalyzer_AnalyzeChannel(t *testing.T) {
