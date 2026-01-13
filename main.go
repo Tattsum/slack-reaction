@@ -86,7 +86,10 @@ func main() {
 	}
 
 	// メッセージの取得と分析
-	emojiStats, messageStats, userStats, err := analyzeChannel(api, channelID, oldest, latest)
+	// channelNameは必ず設定されている（空の場合は既にエラーで終了している）
+	channelNameValue := *channelName
+	log.Printf("デバッグ: analyzeChannelに渡すchannelName: '%s'", channelNameValue)
+	emojiStats, messageStats, userStats, err := analyzeChannel(api, channelID, channelNameValue, oldest, latest)
 	if err != nil {
 		log.Fatalf("チャンネルの分析に失敗しました: %v", err)
 	}
@@ -167,7 +170,11 @@ func getChannelID(api *slack.Client, channelName string) (string, error) {
 }
 
 // チャンネルのメッセージとリアクションを分析する関数（スレッド対応）
-func analyzeChannel(api *slack.Client, channelID, oldest, latest string) ([]EmojiCount, []MessageReaction, []UserStats, error) {
+func analyzeChannel(api *slack.Client, channelID, channelName, oldest, latest string) ([]EmojiCount, []MessageReaction, []UserStats, error) {
+	// デバッグ: channelNameが正しく渡されているか確認
+	if channelName == "" {
+		log.Printf("警告: channelNameが空です。channelIDを使用します: %s", channelID)
+	}
 	emojiCount := make(map[string]int)
 	messageReactions := make([]MessageReaction, 0, 1000)
 	userMessageCount := make(map[string]int)
@@ -193,8 +200,22 @@ func analyzeChannel(api *slack.Client, channelID, oldest, latest string) ([]Emoj
 		// メッセージの取得
 		history, err := api.GetConversationHistoryContext(ctx, &params)
 		if err != nil {
+			// not_in_channelエラーの場合は、より分かりやすいメッセージを表示
+			if strings.Contains(err.Error(), "not_in_channel") {
+				// channelNameが空でない場合は、#を付けて表示
+				var displayName string
+				if channelName != "" {
+					displayName = "#" + channelName
+					log.Printf("デバッグ: channelName='%s', displayName='%s'", channelName, displayName)
+				} else {
+					// channelNameが空の場合は、channelIDを表示
+					displayName = channelID
+					log.Printf("デバッグ: channelNameが空のため、channelIDを使用: %s", channelID)
+				}
+				return nil, nil, nil, fmt.Errorf("チャンネル '%s' に参加していません。Slackでこのチャンネルに参加してから再度実行してください", displayName)
+			}
 			log.Printf("メッセージ取得エラー: %v", err)
-			return nil, nil, nil, err
+			return nil, nil, nil, fmt.Errorf("メッセージ取得エラー: %w", err)
 		}
 
 		// 各メッセージを処理
@@ -226,7 +247,7 @@ func analyzeChannel(api *slack.Client, channelID, oldest, latest string) ([]Emoj
 				// レート制限を避けるため少し待機してからスレッド処理
 				time.Sleep(100 * time.Millisecond)
 
-				err := processThreadMessages(api, ctx, channelID, msg.Timestamp, oldest, latest, emojiCount, &messageReactions, userMessageCount, userIDs)
+				err := processThreadMessages(api, ctx, channelID, channelName, msg.Timestamp, oldest, latest, emojiCount, &messageReactions, userMessageCount, userIDs)
 				if err != nil {
 					log.Printf("スレッドメッセージの処理でエラーが発生しました: %v", err)
 				} else {
@@ -309,7 +330,7 @@ func processMessage(msg *slack.Message, emojiCount map[string]int, messageReacti
 }
 
 // スレッドメッセージを処理する関数（レート制限対応）
-func processThreadMessages(api *slack.Client, ctx context.Context, channelID, threadTimestamp, oldest, latest string, emojiCount map[string]int, messageReactions *[]MessageReaction, userMessageCount map[string]int, userIDs map[string]bool) error {
+func processThreadMessages(api *slack.Client, ctx context.Context, channelID, channelName, threadTimestamp, oldest, latest string, emojiCount map[string]int, messageReactions *[]MessageReaction, userMessageCount map[string]int, userIDs map[string]bool) error {
 	const maxRetries = 3
 
 	for retry := 0; retry < maxRetries; retry++ {
@@ -323,6 +344,16 @@ func processThreadMessages(api *slack.Client, ctx context.Context, channelID, th
 
 		replies, hasMore, _, err := api.GetConversationRepliesContext(ctx, &params)
 		if err != nil {
+			// not_in_channelエラーの場合は、より分かりやすいメッセージを表示
+			if strings.Contains(err.Error(), "not_in_channel") {
+				var displayName string
+				if channelName != "" {
+					displayName = "#" + channelName
+				} else {
+					displayName = channelID
+				}
+				return fmt.Errorf("チャンネル '%s' に参加していません。Slackでこのチャンネルに参加してから再度実行してください", displayName)
+			}
 			if isRateLimitError(err) {
 				sleepTime := extractRetryAfter(err.Error())
 				if sleepTime > 0 {

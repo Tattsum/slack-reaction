@@ -48,6 +48,10 @@ func (r *MessageRepository) FindByChannel(ctx context.Context, channelID string,
 	for hasMore {
 		history, err := r.client.GetConversationHistoryContext(ctx, &params)
 		if err != nil {
+			// not_in_channelエラーの場合は、より分かりやすいメッセージを表示
+			if strings.Contains(err.Error(), "not_in_channel") {
+				return nil, fmt.Errorf("チャンネル '%s' に参加していません。Slackでこのチャンネルに参加してから再度実行してください", channelID)
+			}
 			return nil, fmt.Errorf("メッセージ取得エラー: %w", err)
 		}
 
@@ -93,6 +97,10 @@ func (r *MessageRepository) FindThreadReplies(ctx context.Context, channelID str
 	for retry := 0; retry < maxRetries; retry++ {
 		replies, hasMore, _, err := r.client.GetConversationRepliesContext(ctx, &params)
 		if err != nil {
+			// not_in_channelエラーの場合は、より分かりやすいメッセージを表示
+			if strings.Contains(err.Error(), "not_in_channel") {
+				return nil, fmt.Errorf("チャンネル '%s' に参加していません。Slackでこのチャンネルに参加してから再度実行してください", channelID)
+			}
 			if isRateLimitError(err) {
 				sleepTime := extractRetryAfter(err.Error())
 				if sleepTime > 0 {

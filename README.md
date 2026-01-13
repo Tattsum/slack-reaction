@@ -137,6 +137,7 @@ slack-reaction/
 ## ドキュメント
 
 - [Slackトークン取得方法](docs/slack-token-setup.md) - Slack User Tokenの取得と設定方法の詳細ガイド
+- [トラブルシューティング](docs/TROUBLESHOOTING.md) - よくある問題とその解決方法
 - [コントリビューションガイドライン](docs/CONTRIBUTING.md) - プロジェクトへの貢献方法と開発ガイドライン
 
 ## AIエージェント向け設定
