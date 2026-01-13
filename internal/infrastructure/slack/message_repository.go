@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tattsum/slack-reaction/internal/domain"
@@ -277,7 +278,233 @@ func extractRetryAfter(errMsg string) int {
 }
 
 // FindByUser は指定されたユーザーIDのメッセージを全チャンネルから取得する
+// まずSearch APIを試し、失敗した場合は既存の方法（全チャンネル横断）にフォールバック
 func (r *MessageRepository) FindByUser(ctx context.Context, userID string, dateRange *domain.DateRange) ([]*domain.Message, error) {
+	// Search APIを試す
+	messages, err := r.findByUserWithSearchAPI(ctx, userID, dateRange)
+	if err == nil {
+		return messages, nil
+	}
+
+	// Search APIが使えない場合は、既存の方法にフォールバック
+	// エラーメッセージを分かりやすく表示
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "not_allowed_token_type") {
+		fmt.Printf("Search APIは現在のトークンタイプでは利用できません。全チャンネル横断方式で検索します...\n")
+		fmt.Printf("（注: Search APIを使用するにはBot Tokenが必要です。User Tokenでは利用できません）\n")
+	} else {
+		fmt.Printf("Search APIが利用できないため、全チャンネル横断方式で検索します... (エラー: %v)\n", err)
+	}
+	return r.findByUserFallback(ctx, userID, dateRange)
+}
+
+// findByUserWithSearchAPI はSearch APIを使用してユーザーのメッセージを検索する
+func (r *MessageRepository) findByUserWithSearchAPI(ctx context.Context, userID string, dateRange *domain.DateRange) ([]*domain.Message, error) {
+	// 検索クエリを構築: "from:userID"
+	query := fmt.Sprintf("from:<@%s>", userID)
+
+	// 日付範囲がある場合はクエリに追加
+	if dateRange != nil {
+		if !dateRange.Start.IsZero() {
+			query += fmt.Sprintf(" after:%s", dateRange.Start.Format("2006-01-02"))
+		}
+		if !dateRange.End.IsZero() {
+			query += fmt.Sprintf(" before:%s", dateRange.End.Format("2006-01-02"))
+		}
+	}
+
+	var allMessages []*domain.Message
+	page := 1
+	const maxRetries = 3
+
+	for {
+	searchParams := slack.NewSearchParameters()
+	searchParams.Count = 100 // 最大100件/ページ
+	searchParams.Page = page
+
+		var searchResults *slack.SearchMessages
+		var err error
+
+		// レート制限対応のリトライループ
+		for retry := 0; retry < maxRetries; retry++ {
+			searchResults, err = r.client.SearchMessages(query, searchParams)
+			if err != nil {
+				if isRateLimitError(err) {
+					sleepTime := extractRetryAfter(err.Error())
+					if sleepTime > 0 {
+						time.Sleep(time.Duration(sleepTime) * time.Second)
+						continue
+					} else {
+						time.Sleep(time.Duration(10+retry*5) * time.Second)
+						continue
+					}
+				}
+				// レート制限以外のエラーは即座に返す
+				if retry == maxRetries-1 {
+					return nil, fmt.Errorf("Search APIエラー: %w", err)
+				}
+			} else {
+				// 成功したらループを抜ける
+				break
+			}
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("Search APIエラー: %w", err)
+		}
+
+		// 検索結果をドメインモデルに変換
+		for _, match := range searchResults.Matches {
+			msg := r.convertSearchResultToDomainMessage(&match, dateRange)
+			if msg != nil && msg.UserID == userID {
+				allMessages = append(allMessages, msg)
+			}
+		}
+
+		fmt.Printf("Search API: ページ %d 処理完了 (累計: %d件)\n", page, len(allMessages))
+
+		// 次のページがあるかチェック
+		if page >= searchResults.Paging.Pages {
+			break
+		}
+		page++
+	}
+
+	fmt.Printf("Search API検索完了: 合計 %d件のメッセージが見つかりました\n", len(allMessages))
+
+	// リアクション情報とスレッド情報を補完するため、チャンネルごとにメッセージを取得
+	// チャンネルIDのセットを作成（容量を事前に推定）
+	channelIDs := make(map[string]bool, len(allMessages)/10) // チャンネル数はメッセージ数の10%程度と仮定
+	for _, msg := range allMessages {
+		if msg.ChannelID != "" {
+			channelIDs[msg.ChannelID] = true
+		}
+	}
+
+	// 各チャンネルからメッセージを取得してリアクション情報を補完（並列処理）
+	fmt.Printf("リアクション情報を補完中... (%dチャンネル)\n", len(channelIDs))
+	// チャンネル数分の容量を事前に確保
+	channelMsgMap := make(map[string]map[string]*domain.Message, len(channelIDs)) // channelID -> messageID -> message
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// セマフォで同時実行数を制限（レート制限を考慮して最大10並行）
+	semaphore := make(chan struct{}, 10)
+	channelIDList := make([]string, 0, len(channelIDs))
+	for channelID := range channelIDs {
+		channelIDList = append(channelIDList, channelID)
+	}
+
+	// 並列処理でチャンネルからメッセージを取得
+	for _, channelID := range channelIDList {
+		wg.Add(1)
+		go func(cid string) {
+			defer wg.Done()
+			semaphore <- struct{}{} // セマフォを取得
+			defer func() { <-semaphore }() // セマフォを解放
+
+			channelMessages, err := r.findByChannelSilent(ctx, cid, dateRange)
+			if err != nil {
+				return
+			}
+			msgMap := make(map[string]*domain.Message)
+			for _, chMsg := range channelMessages {
+				msgMap[chMsg.ID] = chMsg
+			}
+
+			mu.Lock()
+			channelMsgMap[cid] = msgMap
+			mu.Unlock()
+		}(channelID)
+	}
+
+	wg.Wait()
+
+	// リアクション情報とスレッド情報を補完
+	// スレッド返信も並列処理で取得
+	var threadRepliesMutex sync.Mutex
+	// スレッド返信の数を事前に推定（親メッセージ数の最大値）
+	threadReplies := make([]*domain.Message, 0, len(allMessages))
+
+	for _, msg := range allMessages {
+		if msgMap, exists := channelMsgMap[msg.ChannelID]; exists {
+			if fullMsg, found := msgMap[msg.ID]; found {
+				msg.Reactions = fullMsg.Reactions
+				msg.ThreadTS = fullMsg.ThreadTS
+
+				// スレッドの親メッセージの場合は、スレッド返信も取得（並列処理）
+				if msg.IsThreadParent() {
+					wg.Add(1)
+					go func(m *domain.Message) {
+						defer wg.Done()
+						semaphore <- struct{}{} // セマフォを取得
+						defer func() { <-semaphore }() // セマフォを解放
+
+						replies, err := r.FindThreadReplies(ctx, m.ChannelID, m.ThreadTS, dateRange)
+						if err == nil {
+							// ユーザーのスレッド返信のみを追加
+							threadRepliesMutex.Lock()
+							for _, reply := range replies {
+								if reply.UserID == userID {
+									threadReplies = append(threadReplies, reply)
+								}
+							}
+							threadRepliesMutex.Unlock()
+						}
+					}(msg)
+				}
+			}
+		}
+	}
+
+	// スレッド返信の取得が完了するまで待機
+	wg.Wait()
+
+	// スレッド返信を追加
+	allMessages = append(allMessages, threadReplies...)
+
+	fmt.Printf("リアクション情報の補完完了: 合計 %d件のメッセージ\n", len(allMessages))
+	return allMessages, nil
+}
+
+// convertSearchResultToDomainMessage はSearch APIの結果をドメインモデルに変換する
+func (r *MessageRepository) convertSearchResultToDomainMessage(match *slack.SearchMessage, dateRange *domain.DateRange) *domain.Message {
+	// タイムスタンプを解析
+	timestamp, err := parseSlackTimestamp(match.Timestamp)
+	if err != nil {
+		return nil
+	}
+
+	// 日付範囲チェック
+	if dateRange != nil && !dateRange.Contains(timestamp) {
+		return nil
+	}
+
+	// リアクションを取得（Search APIの結果にはリアクション情報が含まれない可能性があるため、空スライス）
+	// 容量を0に設定（後で補完される）
+	reactions := make([]domain.Reaction, 0)
+
+	// チャンネルIDを取得（Search APIの結果から）
+	channelID := match.Channel.ID
+
+	// スレッド情報を取得（Search APIの結果からはスレッド情報が直接取得できないため、後で確認する必要がある）
+	// タイムスタンプをIDとして使用
+	threadTS := match.Timestamp
+
+	return &domain.Message{
+		ID:        match.Timestamp,
+		Text:      match.Text,
+		UserID:    match.User,
+		ChannelID: channelID,
+		Timestamp: timestamp,
+		Reactions: reactions,
+		IsBot:     false, // Search APIの結果からは判定できないため、falseとする
+		ThreadTS:  threadTS,
+	}
+}
+
+// findByUserFallback は既存の方法（全チャンネル横断）でユーザーのメッセージを検索する
+func (r *MessageRepository) findByUserFallback(ctx context.Context, userID string, dateRange *domain.DateRange) ([]*domain.Message, error) {
 	// 全チャンネルを取得
 	channelRepo := NewChannelRepository(r.client)
 	channels, err := channelRepo.FindAll(ctx)
@@ -286,65 +513,128 @@ func (r *MessageRepository) FindByUser(ctx context.Context, userID string, dateR
 	}
 
 	var allMessages []*domain.Message
-	channelCount := 0
 	totalChannels := len(channels)
 
-	fmt.Printf("全%dチャンネルからメッセージを検索します...\n", totalChannels)
+	fmt.Printf("全%dチャンネルからメッセージを検索します（並列処理、最大10並行）...\n", totalChannels)
+	fmt.Printf("進捗は10チャンネルごとに表示されます。処理には時間がかかる場合があります。\n")
+
+	// 並列処理でチャンネルからメッセージを取得
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	processedCount := 0
+	var processedMutex sync.Mutex
+
+	// セマフォで同時実行数を制限（レート制限を考慮して最大10並行）
+	semaphore := make(chan struct{}, 10)
 
 	for _, channel := range channels {
-		channelCount++
+		wg.Add(1)
+		go func(ch *domain.Channel) {
+			defer wg.Done()
+			semaphore <- struct{}{} // セマフォを取得
+			defer func() { <-semaphore }() // セマフォを解放
 
-		// 進捗表示（10チャンネルごと、または最後のチャンネル）
-		if channelCount%10 == 0 || channelCount == totalChannels {
-			fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", channelCount, totalChannels, len(allMessages))
-		}
-
-		// チャンネルのメッセージを取得（進捗表示を抑制、レート制限対応）
-		messages, err := r.findByChannelSilentWithRetry(ctx, channel.ID, dateRange)
-		if err != nil {
-			// チャンネルに参加していない場合はスキップ
-			if strings.Contains(err.Error(), "参加していません") {
-				continue
-			}
-			// レート制限エラーは既にリトライ済みなので、スキップ
-			if isRateLimitError(err) {
-				// レート制限エラーは既にリトライ済みなので、スキップ（警告は出さない）
-				continue
-			}
-			// その他のエラーもログに記録するが、処理は続行
-			if channelCount%10 == 0 || channelCount == totalChannels {
-				fmt.Printf("警告: チャンネル '%s' のメッセージ取得エラー: %v\n", channel.Name, err)
-			}
-			continue
-		}
-
-		// 指定されたユーザーのメッセージのみをフィルタリング
-		userMessageCount := 0
-		for _, msg := range messages {
-			if msg.UserID == userID {
-				allMessages = append(allMessages, msg)
-				userMessageCount++
-			}
-		}
-
-		// スレッドの返信も取得（ユーザーのメッセージがある場合のみ）
-		if userMessageCount > 0 {
-			for _, msg := range messages {
-				if msg.IsThreadParent() && msg.UserID == userID {
-					replies, err := r.FindThreadReplies(ctx, channel.ID, msg.ThreadTS, dateRange)
-					if err != nil {
-						continue
+			// チャンネルのメッセージを取得（進捗表示を抑制、レート制限対応）
+			messages, err := r.findByChannelSilentWithRetry(ctx, ch.ID, dateRange)
+			if err != nil {
+				// チャンネルに参加していない場合はスキップ
+				if strings.Contains(err.Error(), "参加していません") {
+					processedMutex.Lock()
+					processedCount++
+					currentCount := processedCount
+					processedMutex.Unlock()
+					// 進捗表示
+					if currentCount%10 == 0 || currentCount == totalChannels {
+						mu.Lock()
+						messageCount := len(allMessages)
+						mu.Unlock()
+						fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, messageCount)
 					}
-					// 指定されたユーザーのスレッド返信のみをフィルタリング
-					for _, reply := range replies {
-						if reply.UserID == userID {
-							allMessages = append(allMessages, reply)
-						}
+					return
+				}
+				// レート制限エラーは既にリトライ済みなので、スキップ
+				if isRateLimitError(err) {
+					processedMutex.Lock()
+					processedCount++
+					currentCount := processedCount
+					processedMutex.Unlock()
+					// 進捗表示
+					if currentCount%10 == 0 || currentCount == totalChannels {
+						mu.Lock()
+						messageCount := len(allMessages)
+						mu.Unlock()
+						fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, messageCount)
+					}
+					return
+				}
+				// その他のエラーもログに記録するが、処理は続行
+				processedMutex.Lock()
+				processedCount++
+				currentCount := processedCount
+				processedMutex.Unlock()
+				if currentCount%10 == 0 || currentCount == totalChannels {
+					mu.Lock()
+					messageCount := len(allMessages)
+					mu.Unlock()
+					fmt.Printf("警告: チャンネル '%s' のメッセージ取得エラー: %v\n", ch.Name, err)
+					fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, messageCount)
+				}
+				return
+			}
+
+			// 指定されたユーザーのメッセージのみをフィルタリング
+			// 容量を事前に推定（メッセージ数の最大値）
+			userMessages := make([]*domain.Message, 0, len(messages))
+			threadParents := make([]*domain.Message, 0, len(messages)/10) // スレッド親は全体の10%程度と仮定
+
+			for _, msg := range messages {
+				if msg.UserID == userID {
+					userMessages = append(userMessages, msg)
+					if msg.IsThreadParent() {
+						threadParents = append(threadParents, msg)
 					}
 				}
 			}
-		}
+
+			// スレッドの返信も取得（ユーザーのメッセージがある場合のみ）
+			// スレッド返信の容量を事前に推定
+			threadReplies := make([]*domain.Message, 0, len(threadParents)*5) // スレッドあたり平均5件と仮定
+			for _, msg := range threadParents {
+				replies, err := r.FindThreadReplies(ctx, ch.ID, msg.ThreadTS, dateRange)
+				if err != nil {
+					continue
+				}
+				// 指定されたユーザーのスレッド返信のみをフィルタリング
+				for _, reply := range replies {
+					if reply.UserID == userID {
+						threadReplies = append(threadReplies, reply)
+					}
+				}
+			}
+
+			// 結果を追加
+			mu.Lock()
+			allMessages = append(allMessages, userMessages...)
+			allMessages = append(allMessages, threadReplies...)
+			mu.Unlock()
+
+			// 進捗表示（10チャンネルごと、または最後のチャンネル）
+			processedMutex.Lock()
+			processedCount++
+			currentCount := processedCount
+			shouldPrint := currentCount%10 == 0 || currentCount == totalChannels
+			processedMutex.Unlock()
+
+			if shouldPrint {
+				mu.Lock()
+				messageCount := len(allMessages)
+				mu.Unlock()
+				fmt.Printf("進捗: %d/%dチャンネル処理完了 (見つかったメッセージ: %d件)\n", currentCount, totalChannels, messageCount)
+			}
+		}(channel)
 	}
+
+	wg.Wait()
 
 	fmt.Printf("メッセージ検索完了: 合計 %d件のメッセージが見つかりました\n", len(allMessages))
 	return allMessages, nil
