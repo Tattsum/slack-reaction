@@ -91,9 +91,10 @@ func countThreads(messages []*domain.Message) int {
 
 // AnalysisResult は分析結果を表す
 type AnalysisResult struct {
-	EmojiStats      []domain.EmojiCount
-	MessageStats    []domain.MessageReaction
-	UserStats       []domain.UserStats
+	EmojiStats       []domain.EmojiCount
+	MessageStats     []domain.MessageReaction
+	ThreadStats      []domain.ThreadStats
+	UserStats        []domain.UserStats
 	UserMessageCount map[string]int
 }
 
@@ -102,6 +103,8 @@ func (a *Analyzer) aggregate(messages []*domain.Message) *AnalysisResult {
 	emojiCount := make(map[string]int)
 	messageReactions := make([]domain.MessageReaction, 0)
 	userMessageCount := make(map[string]int)
+	threadReplyCount := make(map[string]int) // スレッドの親メッセージID -> コメント数
+	threadParents := make(map[string]*domain.Message) // スレッドの親メッセージID -> 親メッセージ
 
 	for _, msg := range messages {
 		// ボットメッセージをスキップ
@@ -128,6 +131,17 @@ func (a *Analyzer) aggregate(messages []*domain.Message) *AnalysisResult {
 				Timestamp: msg.Timestamp.Format("20060102.150405"),
 			})
 		}
+
+		// スレッドの親メッセージを記録
+		if msg.IsThreadParent() {
+			threadParents[msg.ID] = msg
+			threadReplyCount[msg.ID] = 0 // 初期化
+		}
+
+		// スレッドの返信をカウント
+		if msg.IsThreadReply() {
+			threadReplyCount[msg.ThreadTS]++
+		}
 	}
 
 	// 絵文字の使用回数でソート
@@ -144,9 +158,27 @@ func (a *Analyzer) aggregate(messages []*domain.Message) *AnalysisResult {
 		return messageReactions[i].Reactions > messageReactions[j].Reactions
 	})
 
+	// スレッドのコメント数ランキングを作成
+	threadStats := make([]domain.ThreadStats, 0)
+	for threadID, parentMsg := range threadParents {
+		replyCount := threadReplyCount[threadID]
+		if replyCount > 0 {
+			threadStats = append(threadStats, domain.ThreadStats{
+				Text:       parentMsg.Text,
+				ReplyCount: replyCount,
+				Timestamp:  parentMsg.Timestamp.Format("20060102.150405"),
+			})
+		}
+	}
+	// コメント数でソート
+	sort.Slice(threadStats, func(i, j int) bool {
+		return threadStats[i].ReplyCount > threadStats[j].ReplyCount
+	})
+
 	return &AnalysisResult{
-		EmojiStats:      emojiStats,
-		MessageStats:    messageReactions,
+		EmojiStats:       emojiStats,
+		MessageStats:     messageReactions,
+		ThreadStats:      threadStats,
 		UserMessageCount: userMessageCount,
 	}
 }

@@ -67,12 +67,13 @@ func TestAnalyzer_AnalyzeChannel(t *testing.T) {
 	now := time.Now()
 
 	tests := []struct {
-		name         string
-		messages     []*domain.Message
-		users        map[string]*domain.User
-		wantEmojiTop int
-		wantMsgTop   int
-		wantUserTop  int
+		name          string
+		messages      []*domain.Message
+		users         map[string]*domain.User
+		wantEmojiTop  int
+		wantMsgTop    int
+		wantUserTop   int
+		wantThreadTop int
 	}{
 		{
 			name: "基本的な分析",
@@ -105,9 +106,10 @@ func TestAnalyzer_AnalyzeChannel(t *testing.T) {
 				"U1": {ID: "U1", Name: "User1", DisplayName: "ユーザー1"},
 				"U2": {ID: "U2", Name: "User2", DisplayName: "ユーザー2"},
 			},
-			wantEmojiTop: 1, // thumbsupが15回で最多
-			wantMsgTop:   1, // メッセージ2が10回で最多
-			wantUserTop:  2, // 両方のユーザーが1回ずつ
+			wantEmojiTop:  1, // thumbsupが15回で最多
+			wantMsgTop:    1, // メッセージ2が10回で最多
+			wantUserTop:   2, // 両方のユーザーが1回ずつ
+			wantThreadTop: 0, // スレッドなし
 		},
 		{
 			name: "ボットメッセージをスキップ",
@@ -135,9 +137,69 @@ func TestAnalyzer_AnalyzeChannel(t *testing.T) {
 			users: map[string]*domain.User{
 				"U1": {ID: "U1", Name: "User1"},
 			},
-			wantEmojiTop: 1,
-			wantMsgTop:   1,
-			wantUserTop:  1, // ボットはカウントされない
+			wantEmojiTop:  1,
+			wantMsgTop:    1,
+			wantUserTop:   1, // ボットはカウントされない
+			wantThreadTop: 0, // スレッドなし
+		},
+		{
+			name: "スレッドのコメント数ランキング",
+			messages: []*domain.Message{
+				{
+					ID:        "1",
+					Text:      "スレッド親1",
+					UserID:    "U1",
+					ChannelID: "C1",
+					Timestamp: now,
+					ThreadTS:  "1", // スレッドの親
+					IsBot:     false,
+				},
+				{
+					ID:        "2",
+					Text:      "スレッド返信1-1",
+					UserID:    "U2",
+					ChannelID: "C1",
+					Timestamp: now,
+					ThreadTS:  "1", // スレッド1への返信
+					IsBot:     false,
+				},
+				{
+					ID:        "3",
+					Text:      "スレッド返信1-2",
+					UserID:    "U3",
+					ChannelID: "C1",
+					Timestamp: now,
+					ThreadTS:  "1", // スレッド1への返信
+					IsBot:     false,
+				},
+				{
+					ID:        "4",
+					Text:      "スレッド親2",
+					UserID:    "U1",
+					ChannelID: "C1",
+					Timestamp: now,
+					ThreadTS:  "4", // スレッドの親
+					IsBot:     false,
+				},
+				{
+					ID:        "5",
+					Text:      "スレッド返信2-1",
+					UserID:    "U2",
+					ChannelID: "C1",
+					Timestamp: now,
+					ThreadTS:  "4", // スレッド2への返信
+					IsBot:     false,
+				},
+			},
+			users: map[string]*domain.User{
+				"U1": {ID: "U1", Name: "User1"},
+				"U2": {ID: "U2", Name: "User2"},
+				"U3": {ID: "U3", Name: "User3"},
+			},
+			wantEmojiTop:  0,
+			wantMsgTop:    0,
+			wantUserTop:   3,
+			wantThreadTop: 2, // スレッド1が2件、スレッド2が1件
 		},
 	}
 
@@ -160,6 +222,9 @@ func TestAnalyzer_AnalyzeChannel(t *testing.T) {
 			}
 			if len(result.UserStats) < tt.wantUserTop {
 				t.Errorf("UserStats length = %v, want at least %v", len(result.UserStats), tt.wantUserTop)
+			}
+			if len(result.ThreadStats) < tt.wantThreadTop {
+				t.Errorf("ThreadStats length = %v, want at least %v", len(result.ThreadStats), tt.wantThreadTop)
 			}
 		})
 	}
