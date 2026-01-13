@@ -24,9 +24,19 @@ test: ## テストを実行
 	@echo "テストを実行中..."
 	@go test -v ./...
 
+test-coverage: ## テストカバレッジを取得
+	@echo "テストカバレッジを取得中..."
+	@go test -coverprofile=coverage.out ./...
+	@go tool cover -html=coverage.out -o coverage.html
+	@echo "✅ カバレッジレポート: coverage.html"
+
+test-unit: ## ユニットテストのみ実行
+	@echo "ユニットテストを実行中..."
+	@go test -v ./internal/domain/... ./internal/service/...
+
 build: ## アプリケーションをビルド
 	@echo "アプリケーションをビルド中..."
-	@go build -o slack-reaction main.go
+	@go build -o slack-reaction ./cmd/slack-reaction
 	@echo "✅ ビルド完了: ./slack-reaction"
 
 clean: ## ビルド成果物を削除
