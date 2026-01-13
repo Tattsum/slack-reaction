@@ -44,8 +44,10 @@ func (r *MessageRepository) FindByChannel(ctx context.Context, channelID string,
 
 	var messages []*domain.Message
 	hasMore := true
+	pageCount := 0
 
 	for hasMore {
+		pageCount++
 		history, err := r.client.GetConversationHistoryContext(ctx, &params)
 		if err != nil {
 			// not_in_channelエラーの場合は、より分かりやすいメッセージを表示
@@ -61,6 +63,8 @@ func (r *MessageRepository) FindByChannel(ctx context.Context, channelID string,
 				messages = append(messages, domainMsg)
 			}
 		}
+
+		fmt.Printf("メッセージ取得中... (ページ %d, 累計: %d件)\n", pageCount, len(messages))
 
 		hasMore = history.HasMore
 		if hasMore {

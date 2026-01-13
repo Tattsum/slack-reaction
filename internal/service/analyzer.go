@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sort"
 
 	"github.com/Tattsum/slack-reaction/internal/domain"
@@ -24,14 +26,21 @@ func NewAnalyzer(messageRepo domain.MessageRepository, userRepo domain.UserRepos
 // AnalyzeChannel はチャンネルのメッセージとリアクションを分析する
 func (a *Analyzer) AnalyzeChannel(ctx context.Context, channelID string, dateRange *domain.DateRange) (*AnalysisResult, error) {
 	// メッセージを取得
+	fmt.Fprintf(os.Stdout, "メッセージを取得中...\n")
 	messages, err := a.messageRepo.FindByChannel(ctx, channelID, dateRange)
 	if err != nil {
 		return nil, err
 	}
+	fmt.Fprintf(os.Stdout, "メッセージ取得完了: %d件\n", len(messages))
 
 	// スレッドの返信も取得
-	for _, msg := range messages {
+	threadCount := 0
+	for i, msg := range messages {
 		if msg.IsThreadParent() {
+			threadCount++
+			if threadCount%10 == 0 || i == len(messages)-1 {
+				fmt.Fprintf(os.Stdout, "スレッドを処理中... (%d/%dスレッド)\n", threadCount, countThreads(messages))
+			}
 			replies, err := a.messageRepo.FindThreadReplies(ctx, channelID, msg.ThreadTS, dateRange)
 			if err != nil {
 				// エラーはログに記録するが、処理は続行
@@ -40,8 +49,12 @@ func (a *Analyzer) AnalyzeChannel(ctx context.Context, channelID string, dateRan
 			messages = append(messages, replies...)
 		}
 	}
+	if threadCount > 0 {
+		fmt.Fprintf(os.Stdout, "スレッド処理完了: %dスレッドから追加メッセージを取得\n", threadCount)
+	}
 
 	// 分析結果を集計
+	fmt.Fprintf(os.Stdout, "分析結果を集計中... (合計: %dメッセージ)\n", len(messages))
 	result := a.aggregate(messages)
 
 	// ユーザー名を取得
@@ -50,16 +63,30 @@ func (a *Analyzer) AnalyzeChannel(ctx context.Context, channelID string, dateRan
 		userIDs = append(userIDs, userID)
 	}
 
+	fmt.Fprintf(os.Stdout, "ユーザー情報を取得中... (%dユーザー)\n", len(userIDs))
 	users, err := a.userRepo.FindByIDs(ctx, userIDs)
 	if err != nil {
 		// エラーの場合は空のマップを使用
 		users = make(map[string]*domain.User)
 	}
+	fmt.Fprintf(os.Stdout, "ユーザー情報取得完了\n")
 
 	// ユーザー統計を作成
 	result.UserStats = a.buildUserStats(result.UserMessageCount, users)
+	fmt.Fprintf(os.Stdout, "分析完了\n\n")
 
 	return result, nil
+}
+
+// countThreads はスレッドの親メッセージの数をカウントする
+func countThreads(messages []*domain.Message) int {
+	count := 0
+	for _, msg := range messages {
+		if msg.IsThreadParent() {
+			count++
+		}
+	}
+	return count
 }
 
 // AnalysisResult は分析結果を表す
