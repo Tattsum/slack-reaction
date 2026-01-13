@@ -1,0 +1,197 @@
+# Slack トークン取得方法
+
+このドキュメントでは、`slack-reaction` ツールで使用するSlack User Tokenの取得方法を説明します。
+
+## 概要
+
+このツールは、Slack APIを使用してチャンネルのメッセージとリアクションを分析するため、適切な権限を持つSlack User Tokenが必要です。
+
+## 前提条件
+
+- Slackワークスペースへのアクセス権限
+- Slackアプリを作成する権限（ワークスペース管理者の承認が必要な場合があります）
+
+## 手順
+
+### 1. Slackアプリの作成
+
+1. [Slack API](https://api.slack.com/apps) にアクセスし、ログインします
+2. 「**Create New App**」をクリックします
+3. 「**From scratch**」を選択します
+4. アプリ名とワークスペースを選択して「**Create App**」をクリックします
+
+### 2. OAuth スコープの設定
+
+このツールに必要なスコープを設定します。
+
+1. 左側のメニューから「**OAuth & Permissions**」を選択します
+2. 「**Scopes**」セクションの「**User Token Scopes**」に以下のスコープを追加します：
+
+   #### 必須スコープ
+
+   - `channels:read` - パブリックチャンネルの一覧と情報を取得
+   - `channels:history` - パブリックチャンネルのメッセージ履歴を取得
+   - `users:read` - ユーザー情報を取得
+   - `reactions:read` - リアクション情報を取得（メッセージに含まれる）
+
+   #### オプションスコープ（プライベートチャンネルを分析する場合）
+
+   - `groups:read` - プライベートチャンネルの一覧と情報を取得
+   - `groups:history` - プライベートチャンネルのメッセージ履歴を取得
+
+   > **注意**: スコープは最小権限の原則に従い、必要なもののみを追加してください。
+
+### 3. アプリのインストール
+
+1. 「**OAuth & Permissions**」ページの上部にある「**Install to Workspace**」ボタンをクリックします
+2. 権限の確認画面が表示されるので、内容を確認して「**許可する**」をクリックします
+3. インストールが完了すると、ページに「**OAuth Tokens for Your Workspace**」セクションが表示されます
+
+### 4. User OAuth Tokenの取得
+
+1. 「**OAuth Tokens for Your Workspace**」セクションを確認します
+2. 「**User OAuth Token**」の値をコピーします（`xoxp-` で始まるトークン）
+
+   ```text
+   xoxp-1234567890-1234567890123-1234567890123-abcdefghijklmnopqrstuvwxyz1234567890ab
+   ```
+
+   > **重要**: このトークンは機密情報です。他人と共有したり、Gitリポジトリにコミットしたりしないでください。
+
+### 5. 環境変数の設定
+
+取得したトークンを環境変数として設定します。
+
+#### macOS / Linux
+
+```bash
+export SLACK_USER_TOKEN="xoxp-your-token-here"
+```
+
+#### Windows (PowerShell)
+
+```powershell
+$env:SLACK_USER_TOKEN="xoxp-your-token-here"
+```
+
+#### Windows (Command Prompt)
+
+```cmd
+set SLACK_USER_TOKEN=xoxp-your-token-here
+```
+
+#### 永続的な設定（推奨）
+
+環境変数を永続的に設定するには、シェルの設定ファイルに追加します。
+
+**bash/zshの場合** (`~/.bashrc` または `~/.zshrc`):
+
+```bash
+export SLACK_USER_TOKEN="xoxp-your-token-here"
+```
+
+設定を反映:
+
+```bash
+source ~/.bashrc  # または source ~/.zshrc
+```
+
+**fishシェルの場合** (`~/.config/fish/config.fish`):
+
+```fish
+set -gx SLACK_USER_TOKEN "xoxp-your-token-here"
+```
+
+### 6. 動作確認
+
+トークンが正しく設定されているか確認します：
+
+```bash
+echo $SLACK_USER_TOKEN
+```
+
+トークンが表示されれば設定は完了です。
+
+## セキュリティに関する注意事項
+
+### トークンの保護
+
+- **絶対にGitリポジトリにコミットしないでください**
+- `.gitignore` に環境変数ファイルを追加することを推奨します
+- トークンが漏洩した場合は、すぐにSlackアプリの設定からトークンを再生成してください
+
+### トークンの再生成
+
+トークンが漏洩した場合や、定期的なローテーションを行う場合：
+
+1. [Slack API](https://api.slack.com/apps) にアクセス
+2. 該当するアプリを選択
+3. 「**OAuth & Permissions**」を選択
+4. 「**OAuth Tokens for Your Workspace**」セクションで「**Regenerate**」をクリック
+5. 新しいトークンを環境変数に設定し直してください
+
+### 最小権限の原則
+
+このツールは読み取り専用の操作のみを行います。以下のスコープは**不要**です：
+
+- `channels:write` - チャンネルへの書き込み
+- `chat:write` - メッセージの送信
+- `files:write` - ファイルのアップロード
+
+必要最小限のスコープのみを設定することで、セキュリティリスクを最小化できます。
+
+## トラブルシューティング
+
+### エラー: "環境変数 SLACK_USER_TOKEN が設定されていません"
+
+**原因**: 環境変数が正しく設定されていない
+
+**解決方法**:
+
+1. 環境変数が設定されているか確認: `echo $SLACK_USER_TOKEN`
+2. 設定されていない場合は、上記の手順に従って設定してください
+3. 新しいターミナルセッションを開いた場合は、再度設定が必要です
+
+### エラー: "invalid_auth" または "not_authed"
+
+**原因**: トークンが無効または期限切れ
+
+**解決方法**:
+
+1. トークンが正しくコピーされているか確認してください
+2. トークンが再生成されていないか確認してください
+3. 必要に応じて、新しいトークンを取得してください
+
+### エラー: "missing_scope"
+
+**原因**: 必要なスコープが設定されていない
+
+**解決方法**:
+
+1. Slackアプリの設定で、上記の「必須スコープ」がすべて追加されているか確認してください
+2. スコープを追加した後、アプリを再インストールする必要がある場合があります
+3. 「**Install to Workspace**」を再度クリックして、権限を更新してください
+
+### エラー: チャンネルが見つからない
+
+**原因**:
+
+- チャンネル名が間違っている
+- プライベートチャンネルで、`groups:read` スコープが設定されていない
+- アプリがチャンネルにアクセスする権限がない
+
+**解決方法**:
+
+1. チャンネル名が正しいか確認してください（大文字小文字を区別します）
+2. プライベートチャンネルの場合は、`groups:read` と `groups:history` スコープを追加してください
+3. アプリを再インストールして、権限を更新してください
+
+## 参考リンク
+
+- [Slack API ドキュメント](https://api.slack.com/)
+- [OAuth スコープ一覧](https://api.slack.com/scopes)
+- [Slackアプリの作成ガイド](https://api.slack.com/authentication/basics)
+
+## 関連ドキュメント
+
+- [README.md](../README.md) - プロジェクトの概要と使用方法

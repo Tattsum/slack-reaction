@@ -15,19 +15,24 @@ Slackチャンネルのリアクション分析ツール
 ### 前提条件
 
 1. Go 1.24.2以上がインストールされていること
-2. Slack User Tokenが必要
+2. Slack User Tokenが必要（詳細は[Slackトークン取得方法](docs/slack-token-setup.md)を参照）
 
 ### セットアップ
 
 1. 依存関係のインストール：
-```bash
-go mod tidy
-```
 
-2. Slack User Tokenの設定：
-```bash
-export SLACK_USER_TOKEN="your-slack-user-token"
-```
+   ```bash
+   go mod tidy
+   ```
+
+1. Slack User Tokenの設定：
+
+   - トークンの取得方法については、[Slackトークン取得方法](docs/slack-token-setup.md)を参照してください
+   - 取得したトークンを環境変数に設定：
+
+   ```bash
+   export SLACK_USER_TOKEN="your-slack-user-token"
+   ```
 
 ### 実行
 
@@ -53,7 +58,7 @@ go run main.go -channel general -start 2023-01-01 -end 2023-12-31
 
 ## 出力例
 
-```
+```text
 ===== 最も使用されたスタンプ TOP3 =====
 1位: :+1: - 45回
 2位: :eyes: - 32回
@@ -94,6 +99,28 @@ go run main.go -channel general -start 2023-01-01 -end 2023-12-31
 ## 依存関係
 
 - [slack-go/slack](https://github.com/slack-go/slack) v0.16.0
+
+## ドキュメント
+
+- [Slackトークン取得方法](docs/slack-token-setup.md) - Slack User Tokenの取得と設定方法の詳細ガイド
+- [コントリビューションガイドライン](docs/CONTRIBUTING.md) - プロジェクトへの貢献方法と開発ガイドライン
+
+## AIエージェント向け設定
+
+このプロジェクトには、以下のAIエージェント向けの設定ファイルが含まれています：
+
+- **Cursor**: `.cursorrules` - Cursor AIが自動的に参照するルールファイル
+- **GitHub Copilot**: `.github/COPILOT_INSTRUCTIONS.md` - GitHub Copilot向けの指示
+- **Claude Code**: `.claude_instructions.md` - Claude Code向けの指示
+- **Gemini**: `.gemini_instructions.md` - Gemini Code向けの指示
+
+これらの設定により、AIエージェントは以下のルールを自動的に遵守します：
+
+- コード変更後は必ず `make lint` を実行
+- コミット前に `make check` を実行
+- Markdownファイルはmarkdownlintのルールに準拠
+
+詳細は各設定ファイルを参照してください。
 
 ## ライセンス
 
